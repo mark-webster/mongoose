@@ -5,11 +5,13 @@
 #include <string.h>
 #include "mongoose.h"
 
-static void websocket_ready_handler(struct mg_connection *conn) {
+static int websocket_ready_handler(struct mg_connection *conn) {
   unsigned char buf[40];
   buf[0] = 0x81;
   buf[1] = snprintf((char *) buf + 2, sizeof(buf) - 2, "%s", "server ready");
   mg_write(conn, buf, 2 + buf[1]);
+  // Return 1 to enter websocket read loop, or 0 to close the connection
+  return 1;
 }
 
 static int websocket_data_handler(struct mg_connection *conn) {

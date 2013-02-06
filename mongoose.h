@@ -61,7 +61,7 @@ struct mg_callbacks {
   int  (*log_message)(const struct mg_connection *, const char *message);
   int  (*init_ssl)(void *ssl_context);
   int (*websocket_connect)(const struct mg_connection *);
-  void (*websocket_ready)(struct mg_connection *);
+  int (*websocket_ready)(struct mg_connection *);
   int  (*websocket_data)(struct mg_connection *);
   const char * (*open_file)(const struct mg_connection *,
                              const char *path, size_t *data_len);

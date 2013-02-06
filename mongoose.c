@@ -3821,7 +3821,10 @@ static void handle_websocket_request(struct mg_connection *conn) {
   } else {
     send_websocket_handshake(conn);
     if (conn->ctx->callbacks.websocket_ready != NULL) {
-      conn->ctx->callbacks.websocket_ready(conn);
+      if (conn->ctx->callbacks.websocket_ready(conn) == 0) {
+        // Callback signalled to exit, do not proceed to read loop
+        return;
+      }
     }
     read_websocket(conn);
   }
