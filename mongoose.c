@@ -162,6 +162,7 @@ static char *mg_fgets(char *buf, size_t size, struct file *filep, char **p);
 #include <stdint.h>
 #else
 typedef unsigned int  uint32_t;
+typedef unsigned char  uint8_t;
 typedef unsigned short  uint16_t;
 typedef unsigned __int64 uint64_t;
 typedef __int64   int64_t;
@@ -1575,6 +1576,38 @@ int mg_write(struct mg_connection *conn, const void *buf, size_t len) {
                  (int64_t) len);
   }
   return (int) total;
+}
+
+int mg_write_websocket(struct mg_connection *conn, struct mg_websocket_frame *frame,
+                       const void *data) {
+  size_t hdr_len = 2;
+  uint8_t hdr[1+1+8+4];
+  size_t data_len = frame->data_len;
+  int written = 0;
+
+  hdr[0] = *(uint8_t*)&frame->type;
+  hdr[1] = 0;
+  if (data_len < 126) {
+    hdr[1] |= data_len;
+  } else
+  if (data_len < 65536) {
+    hdr[1] |= 126;
+    hdr[2] = data_len >> 8;
+    hdr[3] = data_len & 0xff;
+    hdr_len += 2;
+  } else {
+    hdr[1] |= 127;
+    *(uint32_t *)(hdr+2+0) = htonl( ( (uint64_t)data_len ) >> 32 );
+    *(uint32_t *)(hdr+2+4) = htonl( data_len & 0xffffff );
+    hdr_len += 8;
+  }
+
+  written = mg_write(conn, &hdr, hdr_len);
+  if (data_len > 0 && data != NULL) {
+    written += mg_write(conn, data, data_len);
+  }
+
+  return written;
 }
 
 // Print message to buffer. If buffer is large enough to hold the message,
@@ -3774,33 +3807,47 @@ static void send_websocket_handshake(struct mg_connection *conn) {
 
 static void read_websocket(struct mg_connection *conn) {
   unsigned char *buf = (unsigned char *) conn->buf + conn->request_len;
-  int n, len, mask_len, body_len, discard_len;
+  int n, len, body_len, discard_len;
+  int hdr_len, mask_len, data_len;
+  struct mg_websocket_type type;
   uint32_t mask;
 
   for (;;) {
     if ((body_len = conn->data_len - conn->request_len) >= 2) {
-      len = buf[1] & 127;
-      mask_len = buf[1] & 128 ? 4 : 0;
+      type = *(struct mg_websocket_type *)buf;
+      len = buf[1] & 0x7f;
+	  hdr_len = data_len = mask = 0;
+      mask_len = buf[1] & 0x80 ? 4 : 0;
+
       if (len < 126 && body_len >= (2 + mask_len)) {
-        conn->content_len = 2 + len;
+        hdr_len = 2;
+        data_len = len;
       } else if (len == 126 && body_len >= (4 + mask_len)) {
-        conn->content_len = 4 + ((((int) buf[2]) << 8) + buf[3]);
+        hdr_len = 2 + 2;
+        data_len = ((((int) buf[2]) << 8) + buf[3]);
       } else if (body_len >= (10 + mask_len)) {
-        conn->content_len = 10 +
-          (((uint64_t) htonl(* (uint32_t *) &buf[2])) << 32) +
+        hdr_len = 2 + 8;
+        data_len = (((uint64_t) ntohl(* (uint32_t *) &buf[2])) << 32) +
           htonl(* (uint32_t *) &buf[6]);
       }
-      
-      if (conn->content_len != 0 && mask_len != 0) {
-        mask = *(uint32_t *)(buf + conn->content_len);
-        conn->content_len += mask_len;
+
+      if (hdr_len != 0 && mask_len != 0) {
+        mask = *(uint32_t *)(buf + hdr_len);
+        hdr_len += mask_len;
       }
+      conn->content_len = hdr_len + data_len;
     }
 
     if (conn->content_len > 0) {
       if (conn->ctx->callbacks.websocket_data != NULL) {
-        if (conn->ctx->callbacks.websocket_data(conn) == 0)
+        struct mg_websocket_frame frame;
+        frame.type = type;
+        frame.hdr_len = hdr_len;
+        frame.data_len = data_len;
+        frame.mask = mask;
+        if (conn->ctx->callbacks.websocket_data(conn, &frame) == 0) {
           break;  // Callback signalled to exit
+        }
       }
       discard_len = conn->content_len > body_len ?
           body_len : (int) conn->content_len;

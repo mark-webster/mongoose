@@ -28,8 +28,10 @@
 extern "C" {
 #endif // __cplusplus
 
-struct mg_context;     // Handle for the HTTP service itself
-struct mg_connection;  // Handle for the individual connection
+struct mg_context;         // Handle for the HTTP service itself
+struct mg_connection;      // Handle for the individual connection
+struct mg_websocket_type;
+struct mg_websocket_frame;
 
 
 // This structure contains information about the HTTP request.
@@ -62,12 +64,31 @@ struct mg_callbacks {
   int  (*init_ssl)(void *ssl_context);
   int (*websocket_connect)(const struct mg_connection *);
   int (*websocket_ready)(struct mg_connection *);
-  int  (*websocket_data)(struct mg_connection *);
+  int  (*websocket_data)(struct mg_connection *, struct mg_websocket_frame *);
   const char * (*open_file)(const struct mg_connection *,
                              const char *path, size_t *data_len);
   void (*init_lua)(struct mg_connection *, void *lua_context);
   void (*upload)(struct mg_connection *, const char *file_name);
 };
+
+
+// The bitfield mapping for the first byte of a WebSocket header.
+// See http://lucumr.pocoo.org/2012/9/24/websockets-101/
+struct mg_websocket_type {
+  unsigned char opcode:4,
+                reserved:3,
+                fin:1;
+};
+
+// This structure is passed to the websocket_data callback to describe the
+// WebSocket frame waiting to be read.
+struct mg_websocket_frame {
+  struct mg_websocket_type type;
+  size_t hdr_len;
+  size_t data_len;
+  unsigned mask;
+};
+
 
 // Start web server.
 //
@@ -152,6 +173,16 @@ struct mg_request_info *mg_get_request_info(struct mg_connection *);
 int mg_write(struct mg_connection *, const void *buf, size_t len);
 
 
+// Send a WebSocket frame to the client. Length of *data is given by
+//   mg_websocket_frame->data_len.
+// Return:
+//  0   when the connection has been closed
+//  -1  on error
+//  number of bytes written on success
+int mg_write_websocket(struct mg_connection *, struct mg_websocket_frame *,
+                       const void *data);
+
+
 #undef PRINTF_FORMAT_STRING
 #if _MSC_VER >= 1400
 #include <sal.h>
@@ -185,6 +216,10 @@ void mg_send_file(struct mg_connection *conn, const char *path);
 
 // Read data from the remote end, return number of bytes read.
 int mg_read(struct mg_connection *, void *buf, size_t len);
+
+
+// Read a frame from the websocket
+int mg_websocket_poll(struct mg_websocket_frame *, int timeout_ms);
 
 
 // Get the value of particular HTTP header.
