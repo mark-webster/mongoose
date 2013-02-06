@@ -1,22 +1,3 @@
-Why This Fork?
---------------
-The handling of WebSockets has much room for improvement. The basic things
-being done are:
-
-- A few bugfixes
-- WebSocket frame reader/unmasker and writer
-- Polling of WebSocket connection, enabling the server to also initiate
-  communications, not just respond in a blocking read loop
-
-Nothing else on the roadmap. Hopefully Sergey will find this fork in a good
-enough state to be merged back :)
-
-If you find this project useful, consider donating to the original author.
-
-Mark Webster, Via-Vox Ltd
-
-The original README.md follows.
-
 Project Mission
 ---------------
 
