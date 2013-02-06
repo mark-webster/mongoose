@@ -502,6 +502,7 @@ struct mg_connection {
   int64_t num_bytes_sent;     // Total bytes sent to client
   int64_t content_len;        // Content-Length header value
   int64_t consumed_content;   // How many bytes of content have been read
+  int discard_len;            // 
   char *buf;                  // Buffer for received data
   char *path_info;            // PATH_INFO part of the URL
   int must_close;             // 1 if connection must be closed
@@ -3805,13 +3806,22 @@ static void send_websocket_handshake(struct mg_connection *conn) {
             "Sec-WebSocket-Accept: ", b64_sha, "\r\n\r\n");
 }
 
-static void read_websocket(struct mg_connection *conn) {
+static int read_websocket(struct mg_connection *conn, struct mg_websocket_frame *frame,
+                          int blocking) {
   unsigned char *buf = (unsigned char *) conn->buf + conn->request_len;
   int n, len, body_len, discard_len;
   int hdr_len, mask_len, data_len;
   struct mg_websocket_type type;
   uint32_t mask;
 
+  body_len = conn->data_len - conn->request_len;
+  discard_len = conn->content_len > body_len
+              ? body_len : (int) conn->content_len;
+
+  memmove(buf, buf + discard_len, conn->data_len - discard_len);
+  conn->data_len -= discard_len;
+  conn->content_len = conn->consumed_content = 0;
+  
   for (;;) {
     if ((body_len = conn->data_len - conn->request_len) >= 2) {
       type = *(struct mg_websocket_type *)buf;
@@ -3839,47 +3849,123 @@ static void read_websocket(struct mg_connection *conn) {
     }
 
     if (conn->content_len > 0) {
-      if (conn->ctx->callbacks.websocket_data != NULL) {
-        struct mg_websocket_frame frame;
-        frame.type = type;
-        frame.hdr_len = hdr_len;
-        frame.data_len = data_len;
-        frame.mask = mask;
-        if (conn->ctx->callbacks.websocket_data(conn, &frame) == 0) {
-          break;  // Callback signalled to exit
-        }
-      }
-      discard_len = conn->content_len > body_len ?
-          body_len : (int) conn->content_len;
-      memmove(buf, buf + discard_len, conn->data_len - discard_len);
-      conn->data_len -= discard_len;
-      conn->content_len = conn->consumed_content = 0;
-    } else {
-      n = pull(NULL, conn, conn->buf + conn->data_len,
-               conn->buf_size - conn->data_len);
-      if (n <= 0) {
-        break;
-      }
-      conn->data_len += n;
+      // We have buffered at least enough bytes for a full frame header.
+      frame->type = type;
+      frame->mask = mask;
+      frame->hdr_len = hdr_len;
+      frame->data_len = data_len;
+	  return hdr_len + data_len;
     }
+
+    if (!blocking) {
+      // Not enough data yet for the frame header, but no pull() allowed.
+      return -EAGAIN;
+	}
+
+    n = pull(NULL, conn, conn->buf + conn->data_len,
+             conn->buf_size - conn->data_len);
+    if (n <= 0) {
+      return n;
+    }
+    conn->data_len += n;
+  }
+}
+
+int mg_poll_websocket(struct mg_connection *conn, int timeout_ms,
+                      struct mg_websocket_frame *frame, void *data, size_t data_len) {
+  struct mg_websocket_frame temp_frame;
+  struct mg_websocket_frame *use_frame = frame ? frame : &temp_frame;
+  int read_len, got, remain, result, i;
+  struct timeval tv;
+  fd_set set;
+  char hdr[1+1+8+4];
+  char *buf = (char*) data;
+
+  for (;;) {
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    FD_ZERO(&set);
+    FD_SET(conn->client.sock, &set);
+
+    // Wait for data to be available, until timeout
+    result = select(0, &set, NULL, NULL, &tv);
+    if (result <= 0)
+      return result;
+
+    read_len = pull(NULL, conn, conn->buf + conn->data_len,
+             conn->buf_size - conn->data_len);
+    // Either remote closed the connection or read error?
+    if (read_len <= 0)
+      return -1;
+
+    conn->data_len += read_len;
+    result = read_websocket(conn, use_frame, 0);
+    // Got enough data for frame header?
+    if (result == -EAGAIN)
+      continue;
+
+    // Consume the frame header
+    mg_read(conn, &hdr, use_frame->hdr_len);
+
+    if (data) {
+      got = 0;
+      remain = data_len <= use_frame->data_len ? data_len : use_frame->data_len;
+      // Read the frame data into *data. NB: This might block.
+      while (got < remain) {
+        read_len = mg_read(conn, buf + got, remain - got);
+        // Read error?
+        if (read_len <= 0)
+          return -1;
+        got += read_len;
+      }
+
+      // Unmask the data
+      if (use_frame->mask != 0) {
+        uint32_t mask = use_frame->mask;
+        // First in 32-bit steps
+        for (i=0; (i+3) < got; i+=4)
+          *(uint32_t *)(buf+i) ^= mask;
+        // And the remaining bytes, if any
+        for (; i<got; i++, mask>>=8)
+          *(uint8_t *)(buf+i) ^= mask & 0xff;
+	  }
+    }
+
+    return 1;
   }
 }
 
 static void handle_websocket_request(struct mg_connection *conn) {
+  int read_len;
+  struct mg_websocket_frame frame;
+
   if (strcmp(mg_get_header(conn, "Sec-WebSocket-Version"), "13") != 0) {
     send_http_error(conn, 426, "Upgrade Required", "%s", "Upgrade Required");
-  } else if (conn->ctx->callbacks.websocket_connect != NULL &&
-             conn->ctx->callbacks.websocket_connect(conn) != 0) {
+    return;
+  }
+  
+  if (conn->ctx->callbacks.websocket_connect != NULL &&
+      conn->ctx->callbacks.websocket_connect(conn) != 0) {
     // Callback has returned non-zero, do not proceed with handshake
-  } else {
-    send_websocket_handshake(conn);
-    if (conn->ctx->callbacks.websocket_ready != NULL) {
-      if (conn->ctx->callbacks.websocket_ready(conn) == 0) {
-        // Callback signalled to exit, do not proceed to read loop
-        return;
-      }
-    }
-    read_websocket(conn);
+    return;
+  }
+
+  send_websocket_handshake(conn);
+  if (conn->ctx->callbacks.websocket_ready != NULL &&
+      conn->ctx->callbacks.websocket_ready(conn) == 0) {
+    // Callback signalled to exit, do not proceed to read loop
+    return;
+  }
+
+  // Enter read loop
+  for (;;) {
+    read_len = read_websocket(conn, &frame, 1);
+    if (read_len <= 0)
+      break;
+
+    if (conn->ctx->callbacks.websocket_data != NULL &&
+        conn->ctx->callbacks.websocket_data(conn, &frame) == 0)
+      continue;
   }
 }
 
