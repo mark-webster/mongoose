@@ -19,7 +19,9 @@
 // THE SOFTWARE.
 
 #if defined(_WIN32)
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS // Disable deprecation warning in VS2005
+#endif
 #else
 #ifdef __linux__
 #define _XOPEN_SOURCE 600     // For flockfile() on Linux
@@ -247,8 +249,9 @@ typedef int SOCKET;
 #define CGI_ENVIRONMENT_SIZE 4096
 #define MAX_CGI_ENVIR_VARS 64
 #define MG_BUF_LEN 8192
-#define MAX_REQUEST_SIZE 16384
+#define DEFAULT_MAX_REQUEST_SIZE 16384
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))
+#define STR(arg) #arg
 
 #ifdef _WIN32
 static CRITICAL_SECTION global_log_file_lock;
@@ -432,7 +435,8 @@ enum {
   ACCESS_LOG_FILE, ENABLE_DIRECTORY_LISTING, ERROR_LOG_FILE,
   GLOBAL_PASSWORDS_FILE, INDEX_FILES, ENABLE_KEEP_ALIVE, ACCESS_CONTROL_LIST,
   EXTRA_MIME_TYPES, LISTENING_PORTS, DOCUMENT_ROOT, SSL_CERTIFICATE,
-  NUM_THREADS, RUN_AS_USER, REWRITE, HIDE_FILES, REQUEST_TIMEOUT,
+  NUM_THREADS, RUN_AS_USER, REWRITE, HIDE_FILES, REQUEST_TIMEOUT, 
+  MAX_REQUEST_SIZE,
   NUM_OPTIONS
 };
 
@@ -461,6 +465,7 @@ static const char *config_options[] = {
   "w", "url_rewrite_patterns", NULL,
   "x", "hide_files_patterns", NULL,
   "z", "request_timeout_ms", "30000",
+  "M", "max_request_size", STR(DEFAULT_MAX_REQUEST_SIZE),
   NULL
 };
 #define ENTRIES_PER_CONFIG_OPTION 3
@@ -4692,7 +4697,7 @@ struct mg_connection *mg_connect(const char *host, int port, int use_ssl,
                host, port, strerror(ERRNO));
       closesocket(sock);
     } else if ((conn = (struct mg_connection *)
-                calloc(1, sizeof(*conn) + MAX_REQUEST_SIZE)) == NULL) {
+                calloc(1, sizeof(*conn) + DEFAULT_MAX_REQUEST_SIZE)) == NULL) {
       snprintf(ebuf, ebuf_len, "calloc(): %s", strerror(ERRNO));
       closesocket(sock);
 #ifndef NO_SSL
@@ -4704,7 +4709,7 @@ struct mg_connection *mg_connect(const char *host, int port, int use_ssl,
       conn = NULL;
 #endif // NO_SSL
     } else {
-      conn->buf_size = MAX_REQUEST_SIZE;
+      conn->buf_size = DEFAULT_MAX_REQUEST_SIZE;
       conn->buf = (char *) (conn + 1);
       conn->ctx = &fake_ctx;
       conn->client.sock = sock;
@@ -4871,12 +4876,13 @@ static int consume_socket(struct mg_context *ctx, struct socket *sp) {
 static void *worker_thread(void *thread_func_param) {
   struct mg_context *ctx = thread_func_param;
   struct mg_connection *conn;
+  int max_request_size = atoi(ctx->config[MAX_REQUEST_SIZE]);
 
-  conn = (struct mg_connection *) calloc(1, sizeof(*conn) + MAX_REQUEST_SIZE);
+  conn = (struct mg_connection *) calloc(1, sizeof(*conn) + max_request_size);
   if (conn == NULL) {
     cry(fc(ctx), "%s", "Cannot create new connection struct, OOM");
   } else {
-    conn->buf_size = MAX_REQUEST_SIZE;
+    conn->buf_size = max_request_size;
     conn->buf = (char *) (conn + 1);
     conn->ctx = ctx;
     conn->request_info.user_data = ctx->user_data;
