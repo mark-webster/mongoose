@@ -3775,26 +3775,32 @@ static void send_websocket_handshake(struct mg_connection *conn) {
 static void read_websocket(struct mg_connection *conn) {
   unsigned char *buf = (unsigned char *) conn->buf + conn->request_len;
   int n, len, mask_len, body_len, discard_len;
+  uint32_t mask;
 
   for (;;) {
     if ((body_len = conn->data_len - conn->request_len) >= 2) {
       len = buf[1] & 127;
       mask_len = buf[1] & 128 ? 4 : 0;
-      if (len < 126) {
-        conn->content_len = 2 + mask_len + len;
-      } else if (len == 126 && body_len >= 4) {
-        conn->content_len = 4 + mask_len + ((((int) buf[2]) << 8) + buf[3]);
-      } else if (body_len >= 10) {
-        conn->content_len = 10 + mask_len +
+      if (len < 126 && body_len >= (2 + mask_len)) {
+        conn->content_len = 2 + len;
+      } else if (len == 126 && body_len >= (4 + mask_len)) {
+        conn->content_len = 4 + ((((int) buf[2]) << 8) + buf[3]);
+      } else if (body_len >= (10 + mask_len)) {
+        conn->content_len = 10 +
           (((uint64_t) htonl(* (uint32_t *) &buf[2])) << 32) +
           htonl(* (uint32_t *) &buf[6]);
+      }
+      
+      if (conn->content_len != 0 && mask_len != 0) {
+        mask = *(uint32_t *)(buf + conn->content_len);
+        conn->content_len += mask_len;
       }
     }
 
     if (conn->content_len > 0) {
-      if (conn->ctx->callbacks.websocket_data != NULL &&
-          conn->ctx->callbacks.websocket_data(conn) == 0) {
-        break;  // Callback signalled to exit
+      if (conn->ctx->callbacks.websocket_data != NULL) {
+        if (conn->ctx->callbacks.websocket_data(conn) == 0)
+          break;  // Callback signalled to exit
       }
       discard_len = conn->content_len > body_len ?
           body_len : (int) conn->content_len;
