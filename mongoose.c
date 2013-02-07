@@ -502,7 +502,6 @@ struct mg_connection {
   int64_t num_bytes_sent;     // Total bytes sent to client
   int64_t content_len;        // Content-Length header value
   int64_t consumed_content;   // How many bytes of content have been read
-  int discard_len;            // 
   char *buf;                  // Buffer for received data
   char *path_info;            // PATH_INFO part of the URL
   int must_close;             // 1 if connection must be closed
@@ -3806,22 +3805,50 @@ static void send_websocket_handshake(struct mg_connection *conn) {
             "Sec-WebSocket-Accept: ", b64_sha, "\r\n\r\n");
 }
 
+static int consume_frame(struct mg_connection *conn) {
+  // Length of data held in buffer, from the first read of the current frame.
+  int data_len = conn->data_len - conn->request_len;
+  // Length of data for current frame still waiting to be consumed.
+  int64_t unread_len = conn->content_len - conn->consumed_content;
+  // Length of data held in buffer which actually belongs to the next frame.
+  int64_t trailing_len = (int64_t)data_len - conn->content_len;
+
+  if (conn->content_len > 0 && trailing_len > 0) {
+    char *buf = conn->buf + conn->request_len;
+    memmove(buf, buf + conn->content_len, (size_t) trailing_len);
+    conn->data_len = conn->request_len + (int) trailing_len;
+  } else {
+    // If there is still unread data from the previous frame, drain it.
+    while (unread_len > 0) {
+      char scratch[1024];
+      int read_len = unread_len < (int64_t)sizeof(scratch)
+                   ? (int)unread_len : sizeof(scratch);
+
+      read_len = mg_read(conn, scratch, read_len);
+      if (read_len <= 0)
+        return -1;
+
+      unread_len -= read_len;
+    }
+    trailing_len = 0;
+  }
+
+  conn->data_len = conn->request_len + (int) trailing_len;
+  conn->content_len = conn->consumed_content = 0;
+  return 0;
+}
+
 static int read_websocket(struct mg_connection *conn, struct mg_websocket_frame *frame,
-                          int blocking) {
+                          int reads) {
   unsigned char *buf = (unsigned char *) conn->buf + conn->request_len;
-  int n, len, body_len, discard_len;
+  int n, len, body_len;
   int hdr_len, mask_len, data_len;
   struct mg_websocket_type type;
   uint32_t mask;
 
-  body_len = conn->data_len - conn->request_len;
-  discard_len = conn->content_len > body_len
-              ? body_len : (int) conn->content_len;
+  if (consume_frame(conn) < 0)
+    return -1;
 
-  memmove(buf, buf + discard_len, conn->data_len - discard_len);
-  conn->data_len -= discard_len;
-  conn->content_len = conn->consumed_content = 0;
-  
   for (;;) {
     if ((body_len = conn->data_len - conn->request_len) >= 2) {
       type = *(struct mg_websocket_type *)buf;
@@ -3857,8 +3884,8 @@ static int read_websocket(struct mg_connection *conn, struct mg_websocket_frame 
 	  return hdr_len + data_len;
     }
 
-    if (!blocking) {
-      // Not enough data yet for the frame header, but no pull() allowed.
+    if (reads == 0) {
+      // Not enough data yet for the frame header, but no more pull() allowed.
       return -EAGAIN;
 	}
 
@@ -3868,6 +3895,7 @@ static int read_websocket(struct mg_connection *conn, struct mg_websocket_frame 
       return n;
     }
     conn->data_len += n;
+	reads--;
   }
 }
 
@@ -3881,28 +3909,30 @@ int mg_poll_websocket(struct mg_connection *conn, int timeout_ms,
   char hdr[1+1+8+4];
   char *buf = (char*) data;
 
+  if (consume_frame(conn) < 0)
+    return -1;
+
   for (;;) {
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    if (timeout_ms >= 0) {
+      tv.tv_sec = timeout_ms / 1000;
+      tv.tv_usec = (timeout_ms % 1000) * 1000;
+    }
     FD_ZERO(&set);
     FD_SET(conn->client.sock, &set);
 
     // Wait for data to be available, until timeout
-    result = select(0, &set, NULL, NULL, &tv);
+    result = select(0, &set, NULL, NULL, timeout_ms>=0 ? &tv : NULL);
     if (result <= 0)
       return result;
 
-    read_len = pull(NULL, conn, conn->buf + conn->data_len,
-             conn->buf_size - conn->data_len);
+	// Allow read_websocket() to perform exactly 1 read
+    read_len = read_websocket(conn, use_frame, 1);
+    // Not enough data yet for frame header?
+    if (read_len == -EAGAIN)
+      continue;
     // Either remote closed the connection or read error?
     if (read_len <= 0)
       return -1;
-
-    conn->data_len += read_len;
-    result = read_websocket(conn, use_frame, 0);
-    // Got enough data for frame header?
-    if (result == -EAGAIN)
-      continue;
 
     // Consume the frame header
     mg_read(conn, &hdr, use_frame->hdr_len);
@@ -3928,7 +3958,7 @@ int mg_poll_websocket(struct mg_connection *conn, int timeout_ms,
         // And the remaining bytes, if any
         for (; i<got; i++, mask>>=8)
           *(uint8_t *)(buf+i) ^= mask & 0xff;
-	  }
+      }
     }
 
     return 1;
@@ -3959,7 +3989,7 @@ static void handle_websocket_request(struct mg_connection *conn) {
 
   // Enter read loop
   for (;;) {
-    read_len = read_websocket(conn, &frame, 1);
+    read_len = read_websocket(conn, &frame, -1);
     if (read_len <= 0)
       break;
 

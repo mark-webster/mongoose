@@ -218,7 +218,8 @@ void mg_send_file(struct mg_connection *conn, const char *path);
 int mg_read(struct mg_connection *, void *buf, size_t len);
 
 
-// Poll a WebSocket connection for data. If timeout_ms==0, block until SO_RCVTIMEO.
+// Poll a WebSocket connection for data.
+// If timeout_ms<0, block until SO_RCVTIMEO. timeout_ms==0 won't block at all.
 // When a frame header is received, consume & parse it into mg_websocket_frame*.
 // If data* != NULL, then read & unmask the frame content into data*, up to
 // data_len bytes.
