@@ -250,9 +250,12 @@ typedef int SOCKET;
 #define CGI_ENVIRONMENT_SIZE 4096
 #define MAX_CGI_ENVIR_VARS 64
 #define MG_BUF_LEN 8192
-#define DEFAULT_MAX_REQUEST_SIZE 16384
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))
-#define STR(arg) #arg
+
+#define MG_STRX(x) #x
+#define MG_STR(x) MG_STRX(x)
+#define DEFAULT_MAX_REQUEST_SIZE 16384
+#define DEFAULT_MAX_REQUEST_SIZE_STR MG_STR(DEFAULT_MAX_REQUEST_SIZE)
 
 #ifdef _WIN32
 static CRITICAL_SECTION global_log_file_lock;
@@ -466,7 +469,7 @@ static const char *config_options[] = {
   "w", "url_rewrite_patterns", NULL,
   "x", "hide_files_patterns", NULL,
   "z", "request_timeout_ms", "30000",
-  "M", "max_request_size", STR(DEFAULT_MAX_REQUEST_SIZE),
+  "M", "max_request_size", DEFAULT_MAX_REQUEST_SIZE_STR,
   NULL
 };
 #define ENTRIES_PER_CONFIG_OPTION 3

@@ -14,7 +14,8 @@ static int websocket_ready_handler(struct mg_connection *conn) {
   return 1;
 }
 
-static int websocket_data_handler(struct mg_connection *conn) {
+static int websocket_data_handler(struct mg_connection *conn,
+                                  struct mg_websocket_frame *frame) {
   unsigned char buf[200], reply[200];
   int n, i, mask_len, xor, msg_len, len;
 
