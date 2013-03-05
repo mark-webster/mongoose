@@ -3998,7 +3998,7 @@ static void handle_websocket_request(struct mg_connection *conn) {
 
     if (conn->ctx->callbacks.websocket_data != NULL &&
         conn->ctx->callbacks.websocket_data(conn, &frame) == 0)
-      continue;
+      break;
   }
 }
 
